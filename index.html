@@ -177,8 +177,8 @@ textarea.fc{resize:vertical;min-height:32px;}
 
 /* DUAL PANEL (review mode) */
 .dual-panel{display:grid;grid-template-columns:1fr 1fr;gap:0;height:calc(100vh - 110px);overflow:hidden;}
-.dp-right{overflow-y:auto;padding:14px;border-left:1px solid var(--bd);background:var(--bg);}
-.dp-left{overflow-y:auto;padding:14px;background:var(--card);}
+.dp-right{overflow-y:auto;padding:10px;border-left:2px solid var(--bd);background:#111827;}
+.dp-left{overflow-y:auto;padding:12px;background:var(--card);}
 .dp-right::-webkit-scrollbar,.dp-left::-webkit-scrollbar{width:4px;}
 .dp-right::-webkit-scrollbar-thumb,.dp-left::-webkit-scrollbar-thumb{background:var(--bd);border-radius:2px;}
 
@@ -1040,13 +1040,45 @@ function saveRememberMe(username, password){
 function saveRep(status){
   const name=vv('inp-insp'),fac=vv('inp-fac'),typ=vv('inp-typ'),loc=vv('inp-loc');
   if(!name||!fac||!typ||!loc){showToast('⚠️ يرجى تعبئة الحقول الإلزامية');return;}
+
+  // ── EDIT MODE: update existing report ──────────────────────
+  if(editingRepId){
+    const idx=reps.findIndex(r=>r.id===editingRepId);
+    if(idx>=0){
+      const r=reps[idx];
+      r.inspector=name; r.facility=fac; r.facilityType=typ; r.location=loc;
+      r.cluster=vv('inp-cluster'); r.visitPeriod=vv('inp-per');
+      r.scenario=vv('inp-scen'); r.generalNotes=vv('inp-gnote');
+      r.answers={...ANS}; r.criterionNotes={...CNOTES};
+      // Merge photos (keep old + new)
+      Object.entries(PICS).forEach(([k,v])=>{if(v&&v.length)r.photos[k]=v;});
+      r.score=cAll(ANS);
+      r.sectionScores=Object.fromEntries(CR.map(s=>[s.id,cSec(ANS,s.id)]));
+      r.status=status; r._dirty=true;
+      sv();
+      if(syncCfg&&syncCfg.enabled&&canSync()){
+        pushSingleReport(r).then(()=>showToast('✅ تم حفظ التعديل ومزامنته ☁️'))
+          .catch(()=>showToast('✅ تم حفظ التعديل محلياً'));
+      } else { showToast('✅ تم حفظ التعديل'); }
+      editingRepId=null;
+      const banner=document.getElementById('edit-rep-banner');
+      if(banner) banner.style.display='none';
+      const draftBtn=document.querySelector('.bow');
+      const sendBtn=document.querySelector('.bwh');
+      if(draftBtn) draftBtn.textContent='💾 مسودة';
+      if(sendBtn)  sendBtn.textContent='📤 إرسال';
+      setTimeout(()=>{resetF();gv('dashboard');},1200);
+      return;
+    }
+  }
+  // ── NEW REPORT ──────────────────────────────────────────────
   // Check for duplicate rep num - generate until unique
   let repNum;
   let attempts=0;
   do{repNum=genRepNum();attempts++;}while(reps.find(r=>r.repNum===repNum)&&attempts<10);
   // Check for same facility same day
   const today=new Date().toDateString();
-  const existingToday=reps.filter(r=>r.facility===fac&&new Date(r.createdAt).toDateString()===today);
+  const existingToday=reps.filter(r=>r.facility===fac&&new Date(r.createdAt).toDateString()===today&&r.id!==editingRepId);
   if(existingToday.length>0&&!confirm(`⚠️ يوجد ${existingToday.length} تقرير مسبق لنفس المنشأة اليوم. هل تريد الاستمرار؟`))return;
   const sc=cAll(ANS);
   const secSc=Object.fromEntries(CR.map(s=>[s.id,cSec(ANS,s.id)]));
@@ -1208,6 +1240,90 @@ function viewRep(id){
   gv('detail');
 }
 
+// ── Edit existing report — load into form ───────────────────
+let editingRepId = null;
+
+function editReport(id){
+  const r = reps.find(x=>x.id===id);
+  if(!r){ showToast('⚠️ لم يتم العثور على التقرير'); return; }
+  // Check permission — only inspector who created it OR leader/supervisor
+  const canEdit = currentUser?.role==='leader' || currentUser?.role==='supervisor'
+    || r.inspector===currentUser?.name || r.inspector===currentUser?.username;
+  if(!canEdit){ showToast('⛔ لا يمكنك تعديل هذا التقرير'); return; }
+
+  editingRepId = id;
+  // Reset form first
+  ANS={}; PICS={}; CNOTES={};
+  buildCriteria();
+
+  // Fill basic info
+  const setVal=(elId,val)=>{const el=document.getElementById(elId);if(el)el.value=val||'';};
+  setVal('inp-insp', r.inspector);
+  setVal('inp-fac',  r.facility);
+  setVal('inp-loc',  r.location);
+  setVal('inp-cluster', r.cluster);
+  setVal('inp-gnote', r.generalNotes);
+  const typEl=document.getElementById('inp-typ'); if(typEl) typEl.value=r.facilityType||'';
+  const perEl=document.getElementById('inp-per'); if(perEl) perEl.value=r.visitPeriod||'صباحي';
+  const scnEl=document.getElementById('inp-scen'); if(scnEl) scnEl.value=r.scenario||'مريض فعلي';
+
+  // Restore answers
+  ANS = {...(r.answers||{})};
+  Object.entries(ANS).forEach(([key,val])=>{
+    ['yes','no','na'].forEach(v=>{
+      const b=document.getElementById('ab-'+key+'-'+v);
+      if(b){b.className='ab';if(v===val)b.classList.add(v==='yes'?'sy':v==='no'?'sn':'sa');}
+    });
+    const ci=document.getElementById('ci-'+key);
+    if(ci) ci.className='ci'+(val==='yes'?' ci-yes':val==='no'?' ci-no':val==='na'?' ci-na':'');
+    const sid=key.split('__')[0];
+    const el=document.getElementById('ss-'+sid);
+    if(el) el.textContent=cSec(ANS,sid)+'%';
+  });
+  uScore();
+
+  // Restore criterion notes
+  CNOTES = JSON.parse(JSON.stringify(r.criterionNotes||{}));
+  Object.keys(CNOTES).forEach(key=>{ renderCNList(key); updCNBadge(key); });
+
+  // Restore photos (display only — can't re-edit canvas photos)
+  PICS = JSON.parse(JSON.stringify(r.photos||{}));
+  Object.keys(PICS).forEach(key=>rPics(key));
+
+  // Change submit button labels to show "update"
+  const draftBtn = document.querySelector('.bow');
+  const sendBtn  = document.querySelector('.bwh');
+  if(draftBtn) draftBtn.textContent = '💾 حفظ التعديل كمسودة';
+  if(sendBtn)  sendBtn.textContent  = '📤 إرسال التعديل للمراجعة';
+
+  // Show edit banner
+  let banner=document.getElementById('edit-rep-banner');
+  if(!banner){
+    banner=document.createElement('div');
+    banner.id='edit-rep-banner';
+    banner.style.cssText='background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:9px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;';
+    const pg=document.getElementById('crit-cont');
+    if(pg&&pg.parentNode) pg.parentNode.insertBefore(banner,pg);
+  }
+  banner.innerHTML=`<span style="font-size:12px;font-weight:700;">✏️ وضع التعديل — تقرير: <strong>${r.repNum||r.id}</strong> — ${r.facility}</span>
+    <button class="btn bd2 bsm" onclick="cancelEdit()">✕ إلغاء التعديل</button>`;
+
+  gv('new-report');
+  showToast('✏️ يمكنك الآن تعديل التقرير');
+}
+
+function cancelEdit(){
+  editingRepId=null;
+  resetF();
+  const banner=document.getElementById('edit-rep-banner');
+  if(banner) banner.style.display='none';
+  const draftBtn=document.querySelector('.bow');
+  const sendBtn=document.querySelector('.bwh');
+  if(draftBtn) draftBtn.textContent='💾 مسودة';
+  if(sendBtn)  sendBtn.textContent='📤 إرسال';
+  gv('dashboard');
+}
+
 function buildPhotoPanel(r){
   const cont=document.getElementById('photo-panel-content');if(!cont)return;
   // Collect all photos grouped by criterion
@@ -1219,17 +1335,19 @@ function buildPhotoPanel(r){
   })));
 
   if(!photoByCrit.length){
-    cont.innerHTML='<div style="text-align:center;padding:30px;color:var(--mu);"><div style="font-size:36px;margin-bottom:9px;">📷</div><p>لا توجد صور مرفقة</p><p style="font-size:10px;margin-top:5px;">ارفع صور من صفحة التقرير لتظهر هنا</p></div>';
+    cont.innerHTML=`<div style="text-align:center;padding:40px;color:#9ca3af;"><div style="font-size:44px;margin-bottom:12px;opacity:.4;">📷</div><p style="font-size:12px;font-weight:600;">لا توجد صور مرفقة</p></div>`;
     return;
   }
 
-  cont.innerHTML=photoByCrit.map((crit,ci)=>`
-    <div style="margin-bottom:14px;">
-      <div style="font-size:10px;font-weight:700;color:var(--pr);margin-bottom:6px;padding:4px 8px;background:var(--prp2);border-radius:6px;display:flex;align-items:center;gap:5px;">
-        <span style="background:${crit.ans==='no'?'var(--nol)':crit.ans==='yes'?'var(--okl)':'var(--ntl)'};color:#fff;padding:1px 6px;border-radius:8px;font-size:9px;">${crit.ans==='yes'?'✓ نعم':crit.ans==='no'?'✗ لا':crit.ans==='na'?'غ.مطبق':'—'}</span>
-        ${crit.secTitle} › ${crit.label.substring(0,45)}
+  cont.innerHTML=`<div style="font-size:10px;color:var(--mu);margin-bottom:8px;">📷 ${photoByCrit.reduce((a,c)=>a+c.photos.length,0)} صورة — اضغط ✏️ على أي صورة للتعديل</div>`
+  +photoByCrit.map((crit,ci)=>`
+    <div style="margin-bottom:6px;border:1px solid #2d3748;border-radius:8px;overflow:hidden;" id="photo-section-${crit.key}">
+      <div style="font-size:10px;font-weight:700;padding:6px 10px;background:#1e3a5f;display:flex;align-items:center;gap:5px;cursor:pointer;color:#e2e8f0;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
+        <span style="background:${crit.ans==='no'?'#ef4444':crit.ans==='yes'?'#22c55e':'#6b7280'};color:#fff;padding:1px 7px;border-radius:8px;font-size:9px;flex-shrink:0;">${crit.ans==='yes'?'✓ نعم':crit.ans==='no'?'✗ لا':crit.ans==='na'?'غ.مطبق':'—'}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${crit.label.substring(0,48)}</span>
+        <span style="opacity:.6;font-size:9px;flex-shrink:0;">${crit.photos.length} صورة ▼</span>
       </div>
-      <div style="display:flex;flex-direction:column;gap:8px;">
+      <div style="background:#111827;">
         ${crit.photos.map((p,pi)=>buildPhotoEditor(r.id,crit.key,pi,p)).join('')}
       </div>
     </div>`).join('');
@@ -1240,29 +1358,45 @@ function buildPhotoPanel(r){
 
 function buildPhotoEditor(repId,key,pi,photo){
   const cid=`c-${key.replace(/__/g,'-')}-${pi}`;
-  return `<div style="background:#1a1a2e;border-radius:8px;overflow:hidden;">
-    <div style="display:flex;gap:3px;padding:6px 8px;background:#16213e;flex-wrap:wrap;">
-      <button class="ie-btn" onclick="setDraw('${cid}','circle')" id="db-circ-${cid}">⬤ دائرة</button>
-      <button class="ie-btn" onclick="setDraw('${cid}','arrow')" id="db-arr-${cid}">➤ سهم</button>
-      <button class="ie-btn" onclick="setDraw('${cid}','rect')" id="db-rect-${cid}">□ مستطيل</button>
-      <button class="ie-btn" onclick="setDraw('${cid}','blur')" id="db-blur-${cid}">🌫️ تغبيش</button>
-      <button class="ie-btn" onclick="setDraw('${cid}','text')" id="db-txt-${cid}">T نص</button>
-      <button class="ie-btn" onclick="rotateImg('${cid}')">🔄 قلب</button>
-      <button class="ie-btn" onclick="flipImg('${cid}')">↔️ عكس</button>
-      <button class="ie-btn" onclick="undoImg('${cid}')">↩️ تراجع</button>
-      <button class="ie-btn" onclick="saveAnnotated('${cid}','${repId}','${key}',${pi})">💾 حفظ</button>
-      <button class="ie-btn" onclick="opv(document.getElementById('${cid}').toDataURL(),'صورة محررة')" style="background:#0f5460;">🔍 تكبير</button>
+  return `<div style="background:#111;border-radius:8px;overflow:hidden;margin-bottom:6px;" id="pe-wrap-${cid}">
+    <!-- Toolbar — hidden by default, shown on edit mode -->
+    <div id="pe-tools-${cid}" style="display:none;">
+      <div style="display:flex;gap:3px;padding:5px 8px;background:#16213e;flex-wrap:wrap;align-items:center;">
+        <button class="ie-btn" onclick="setDraw('${cid}','circle')" id="db-circ-${cid}">⬤</button>
+        <button class="ie-btn" onclick="setDraw('${cid}','arrow')" id="db-arr-${cid}">➤</button>
+        <button class="ie-btn" onclick="setDraw('${cid}','rect')" id="db-rect-${cid}">□</button>
+        <button class="ie-btn" onclick="setDraw('${cid}','blur')" id="db-blur-${cid}">🌫️</button>
+        <button class="ie-btn" onclick="setDraw('${cid}','text')" id="db-txt-${cid}">T</button>
+        <div style="width:1px;height:18px;background:rgba(255,255,255,.2);margin:0 3px;"></div>
+        <button class="ie-btn" onclick="rotateImg('${cid}')">🔄</button>
+        <button class="ie-btn" onclick="flipImg('${cid}')">↔️</button>
+        <button class="ie-btn" onclick="undoImg('${cid}')">↩️</button>
+        <div style="width:1px;height:18px;background:rgba(255,255,255,.2);margin:0 3px;"></div>
+        ${['#ff0000','#00ff00','#0088ff','#ffff00','#fff'].map(col=>`<div class="color-dot" style="background:${col};" onclick="setColor('${cid}','${col}')" id="cd-${cid}-${col.replace('#','')}"></div>`).join('')}
+        <input type="range" class="size-range" min="2" max="30" value="4" oninput="setSize('${cid}',this.value)" style="width:55px;margin-right:4px;">
+        <button class="ie-btn" onclick="saveAnnotated('${cid}','${repId}','${key}',${pi})" style="background:#1b5e20;margin-right:auto;">💾 حفظ</button>
+        <button class="ie-btn" onclick="toggleEditMode('${cid}')" style="background:#37474f;">✕ إغلاق</button>
+      </div>
     </div>
-    <div style="display:flex;gap:4px;padding:4px 8px;background:#0f3460;align-items:center;">
-      <span style="font-size:9px;color:#aaa;">اللون:</span>
-      ${['#ff0000','#00ff00','#0088ff','#ffff00','#ff8800','#fff'].map(col=>`<div class="color-dot" style="background:${col};" onclick="setColor('${cid}','${col}')" id="cd-${cid}-${col.replace('#','')}"></div>`).join('')}
-      <span style="font-size:9px;color:#aaa;margin-right:6px;">الحجم:</span>
-      <input type="range" class="size-range" min="2" max="30" value="4" oninput="setSize('${cid}',this.value)" style="width:70px;">
-    </div>
-    <div style="display:flex;align-items:center;justify-content:center;background:#1a1a2e;padding:8px;min-height:200px;" data-key="${key}">
-      <canvas id="${cid}" style="max-width:100%;cursor:crosshair;border-radius:4px;" data-key="${key}" data-pi="${pi}" data-repid="${repId}"></canvas>
+    <!-- Image view area -->
+    <div style="position:relative;background:#1a1a2e;" data-key="${key}">
+      <canvas id="${cid}" style="max-width:100%;display:block;border-radius:${0}px;" data-key="${key}" data-pi="${pi}" data-repid="${repId}"></canvas>
+      <!-- Overlay buttons — always visible -->
+      <div style="position:absolute;top:6px;left:6px;display:flex;gap:4px;" id="pe-overlay-${cid}">
+        <button onclick="toggleEditMode('${cid}')" style="background:rgba(26,82,118,.85);color:#fff;border:none;border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer;font-family:inherit;backdrop-filter:blur(4px);">✏️ تعديل</button>
+        <button onclick="opv(document.getElementById('${cid}').toDataURL(),'صورة')" style="background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:6px;padding:4px 9px;font-size:10px;cursor:pointer;backdrop-filter:blur(4px);">🔍</button>
+      </div>
     </div>
   </div>`;
+}
+
+function toggleEditMode(cid){
+  const tools=document.getElementById('pe-tools-'+cid);
+  const canvas=document.getElementById(cid);
+  if(!tools) return;
+  const isOpen = tools.style.display !== 'none';
+  tools.style.display = isOpen ? 'none' : 'block';
+  if(canvas) canvas.style.cursor = isOpen ? 'default' : 'crosshair';
 }
 
 // Canvas image editor state per canvas
@@ -1438,6 +1572,10 @@ function detSetAns(repId,key,val){
     });
   }
   const scTop=document.getElementById('det-score-top');if(scTop)scTop.textContent='النتيجة: '+reps[idx].score+'%';
+  // Push update immediately — preserve original inspector (don't change ownership)
+  if(syncCfg?.enabled){
+    pushSingleReport(reps[idx]).catch(e=>console.warn('push after edit:',e));
+  }
   showToast('✏️ الإجابة: '+{yes:'نعم',no:'لا',na:'غير مطبق'}[val]+' — النتيجة: '+reps[idx].score+'%');
 }
 function detAddCN(repId,key){
@@ -1451,6 +1589,7 @@ function detAddCN(repId,key){
   sv();inEl.value='';
   const cnEl=document.getElementById('detcn-'+key);
   if(cnEl){const cns=reps[idx].criterionNotes[key];cnEl.innerHTML=`<div style="display:flex;gap:2px;flex-wrap:wrap;margin-bottom:3px;">${cns.map((cn,ci)=>`<span class="badge ${cn.type==='iss'?'bgd':cn.type==='rec'?'bgs':'bgi'}" style="cursor:pointer;" onclick="detDelCN('${repId}','${key}',${ci})">⊗ ${cn.txt.substring(0,22)}</span>`).join('')}</div>`;}
+  if(syncCfg?.enabled){ const r=reps.find(x=>x.id===repId); if(r){markDirty(repId);pushSingleReport(r).catch(()=>{});} }
   showToast('📝 تمت الإضافة');
 }
 function detDelCN(repId,key,ci){
@@ -1461,7 +1600,7 @@ function detDelCN(repId,key,ci){
   if(cnEl){const cns=reps[idx].criterionNotes[key];cnEl.innerHTML=cns.length?`<div style="display:flex;gap:2px;flex-wrap:wrap;margin-bottom:3px;">${cns.map((cn,ci2)=>`<span class="badge ${cn.type==='iss'?'bgd':cn.type==='rec'?'bgs':'bgi'}" style="cursor:pointer;" onclick="detDelCN('${repId}','${key}',${ci2})">⊗ ${cn.txt.substring(0,22)}</span>`).join('')}</div>`:''}
   showToast('🗑️ تم الحذف');
 }
-function detSaveNote(repId,val){const idx=reps.findIndex(r=>r.id===repId);if(idx<0)return;reps[idx].generalNotes=val;sv();showToast('💾 تم حفظ الملاحظات');}
+function detSaveNote(repId,val){const idx=reps.findIndex(r=>r.id===repId);if(idx<0)return;reps[idx].generalNotes=val;markDirty(repId);sv();if(syncCfg?.enabled)pushSingleReport(reps[idx]).catch(()=>{});showToast('💾 تم حفظ الملاحظات');}
 
 // ═══════════════════════════════════════════════════
 // REVIEWS
