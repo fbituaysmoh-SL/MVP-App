@@ -1072,10 +1072,26 @@ function vv(id){return(document.getElementById(id)||{}).value||'';}
 // ═══════════════════════════════════════════════════
 // DASHBOARD
 // ═══════════════════════════════════════════════════
+// Filter reports based on user permissions
+function visibleReps(){
+  if(!currentUser) return [];
+  // 'my_reports' perm = see only own reports (unless also has 'view' or higher role)
+  const perms = currentUser.customPerms || ROLES[currentUser.role]?.perms || [];
+  const allPerms = perms.includes('all');
+  const canViewAll = allPerms || perms.includes('view') || ['leader','supervisor'].includes(currentUser.role);
+  const myOnly = !canViewAll && perms.includes('my_reports');
+  if(myOnly){
+    return reps.filter(r=> r.inspector===currentUser.name || r.inspector===currentUser.username);
+  }
+  return reps;
+}
+
 function rDash(){
   const q=(vv('dash-q')).toLowerCase();
-  const filt=reps.filter(r=>!q||r.facility?.toLowerCase().includes(q)||r.inspector?.toLowerCase().includes(q)||r.repNum?.toLowerCase().includes(q));
-  const tot=reps.length,app=reps.filter(r=>r.status==='approved').length,pen=reps.filter(r=>r.status==='pending').length,rej=reps.filter(r=>r.status==='rejected').length,dra=reps.filter(r=>r.status==='draft').length,avg=tot>0?Math.round(reps.reduce((a,r)=>a+(r.score||0),0)/tot):0;
+  const base = visibleReps();
+  const filt=base.filter(r=>!q||r.facility?.toLowerCase().includes(q)||r.inspector?.toLowerCase().includes(q)||r.repNum?.toLowerCase().includes(q));
+  const allVisible=visibleReps();
+  const tot=allVisible.length,app=allVisible.filter(r=>r.status==='approved').length,pen=allVisible.filter(r=>r.status==='pending').length,rej=allVisible.filter(r=>r.status==='rejected').length,dra=allVisible.filter(r=>r.status==='draft').length,avg=tot>0?Math.round(allVisible.reduce((a,r)=>a+(r.score||0),0)/tot):0;
   ['st-tot','st-app','st-pen','st-rej','st-dra'].forEach((id,i)=>{const el=document.getElementById(id);if(el)el.textContent=[tot,app,pen,rej,dra][i];});
   const ae=document.getElementById('st-avg');if(ae)ae.textContent=avg?avg+'%':'-';
   const list=document.getElementById('dash-list');if(!list)return;
@@ -1121,7 +1137,7 @@ function updateBrSub(){const sid=vv('br-sec'),sub=document.getElementById('br-su
 function updateBrItem(){const sid=vv('br-sec'),subId=vv('br-sub'),itemSel=document.getElementById('br-item');if(!subId){itemSel.innerHTML='<option value="">الكل</option>';return;}const sec=CR.find(s=>s.id===sid);const sub=sec?sec.subcriteria.find(s=>s.id===subId):null;itemSel.innerHTML='<option value="">الكل</option>'+(sub?sub.items.map(i=>`<option value="${sub.id}__${i.id}">${i.q.substring(0,48)}</option>`).join(''):'');}
 function rBr(){
   const typ=vv('br-type'),cluster=vv('br-cluster'),st=vv('br-st'),insp=vv('br-insp'),per=vv('br-per'),d1=vv('br-d1'),d2=vv('br-d2'),minS=parseInt(vv('br-min'))||0,maxS=parseInt(vv('br-max'))||100,srt=vv('br-sort'),q=vv('br-q').toLowerCase(),secId=vv('br-sec'),subId=vv('br-sub'),itemVal=vv('br-item'),noteQ=vv('br-note-q').toLowerCase();
-  let filt=reps.filter(r=>{
+  let filt=visibleReps().filter(r=>{
     if(typ&&r.facilityType!==typ)return false;
     if(cluster&&r.cluster!==cluster)return false;
     if(st&&r.status!==st)return false;
@@ -1436,7 +1452,7 @@ function detSaveNote(repId,val){const idx=reps.findIndex(r=>r.id===repId);if(idx
 // ═══════════════════════════════════════════════════
 function rRev(){
   const st=vv('rv-st'),ty=vv('rv-ty'),insp=vv('rv-insp'),cluster=vv('rv-cluster'),so=vv('rv-so'),q=vv('rv-q').toLowerCase();
-  let filt=reps.filter(r=>{if(st&&r.status!==st)return false;if(ty&&r.facilityType!==ty)return false;if(insp&&r.inspector!==insp)return false;if(cluster&&r.cluster!==cluster)return false;if(q&&!r.facility?.toLowerCase().includes(q)&&!r.inspector?.toLowerCase().includes(q)&&!r.repNum?.toLowerCase().includes(q))return false;return true;});
+  let filt=visibleReps().filter(r=>{if(st&&r.status!==st)return false;if(ty&&r.facilityType!==ty)return false;if(insp&&r.inspector!==insp)return false;if(cluster&&r.cluster!==cluster)return false;if(q&&!r.facility?.toLowerCase().includes(q)&&!r.inspector?.toLowerCase().includes(q)&&!r.repNum?.toLowerCase().includes(q))return false;return true;});
   if(so==='date-d')filt.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
   else if(so==='sc-d')filt.sort((a,b)=>b.score-a.score);
   else filt.sort((a,b)=>a.score-b.score);
@@ -1502,7 +1518,7 @@ function rCompletion(){
   const list=document.getElementById('comp-list');if(!list)return;
   list.innerHTML=`<div style="overflow-x:auto;"><table class="tbl"><thead><tr><th>#</th><th>المنشأة</th><th>النوع</th><th>التجمع</th><th>المقيّم المُسند</th><th>عدد التقارير</th><th>آخر نتيجة</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>
   ${facList.map((f,i)=>{
-    const allReps=reps.filter(r=>r.facility===f.name).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+    const allReps=visibleReps().filter(r=>r.facility===f.name).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
     const repCount=allReps.length;const lastRep=allReps[0];
     const approved=allReps.find(r=>r.status==='approved');
     let statusHtml,statusClass;
@@ -1529,7 +1545,7 @@ function fillFacForNew(name,type,insp,cluster){document.getElementById('inp-fac'
 // ═══════════════════════════════════════════════════
 function rAn(){
   const typeF=vv('an-type'),inspF=vv('an-insp'),stF=vv('an-st');
-  let data=reps.filter(r=>{if(typeF&&r.facilityType!==typeF)return false;if(inspF&&r.inspector!==inspF)return false;if(stF&&r.status!==stF)return false;return true;});
+  let data=visibleReps().filter(r=>{if(typeF&&r.facilityType!==typeF)return false;if(inspF&&r.inspector!==inspF)return false;if(stF&&r.status!==stF)return false;return true;});
   const cont=document.getElementById('an-cont');
   if(!data.length){cont.innerHTML='<div class="card"><p style="color:var(--mu);text-align:center;padding:28px;">لا توجد بيانات كافية</p></div>';return;}
   const avg=ns=>ns.length?Math.round(ns.reduce((a,b)=>a+b,0)/ns.length):0;
@@ -1713,7 +1729,7 @@ function showToast(msg,dur=3000){const t=document.getElementById('toast');t.text
 const ROLES = {
   leader:    {label:'قائد',icon:'👑',color:'#c0392b', perms:['all']},
   supervisor:{label:'مشرف',icon:'🔍',color:'#8e44ad', perms:['view','review','approve','analytics','import','assign','completion','users_view']},
-  inspector: {label:'مقيّم',icon:'📋',color:'#2471a3', perms:['view','create','my_reports']},
+  inspector: {label:'مقيّم',icon:'📋',color:'#2471a3', perms:['create','my_reports']},
   viewer:    {label:'مشاهد',icon:'👁️',color:'#27ae60', perms:['view','analytics']}
 };
 // 'sync' صلاحية تشغيل المزامنة — مخصصة للقائد فقط ويمكنه منحها لأي مستخدم
@@ -2366,27 +2382,31 @@ async function pushToServer(){
 
 // ── Pull remote reports ──────────────────────────────────────
 async function pullFromServer(){
-  let path = '/reports?order=created_at.desc&limit=500';
-  if(lastSyncTime){
-    const since = lastSyncTime.toISOString();
-    path = '/reports?updated_at=gte.'+encodeURIComponent(since)+'&order=updated_at.desc&limit=500';
-  }
-  const rows = await sbFetch(path);
-  if(!rows||!rows.length) return;
+  // Always pull all reports (server is source of truth)
+  const rows = await sbFetch('/reports?order=created_at.desc&limit=1000');
+  if(!rows) return;
   let added=0, updated=0;
+  // Build map of server IDs
+  const serverIds = new Set(rows.map(row=>row.id));
   rows.forEach(row=>{
     const r = rowToRep(row);
     const local = reps.find(x=>x.id===r.id);
     if(!local){ reps.push(r); added++; }
     else if(!local._dirty){
+      // Preserve local photos (not stored in server)
+      r.photos = local.photos||{};
       Object.assign(local, r); updated++;
     }
   });
-  if(added||updated){
+  // Remove local reports that were deleted on server (except dirty ones)
+  const before = reps.length;
+  reps = reps.filter(r=> serverIds.has(r.id) || r._dirty || r.source==='local');
+  const removed = before - reps.length;
+  if(added||updated||removed){
     reps.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
     sv(); rDash(); initFilters();
     const el=document.getElementById('sync-status');
-    if(el&&(added||updated)) el.textContent=`☁️ ${added} جديد، ${updated} محدَّث من السحابة`;
+    if(el) el.textContent=`☁️ ${added} جديد، ${updated} محدَّث من السحابة`;
   }
 }
 
@@ -2414,7 +2434,8 @@ function repToRow(r){
     review_notes: r.reviewNotes||[],
     section_scores: r.sectionScores||{},
     photos_count: Object.values(r.photos||{}).reduce((a,p)=>a+(p||[]).length,0),
-    source: r.source||'app'
+    source: r.source||'app',
+    updated_at: new Date().toISOString()
   };
 }
 
