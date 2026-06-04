@@ -746,6 +746,11 @@ document.addEventListener('DOMContentLoaded',()=>{
   setInterval(uDT,1000);uDT();getGeo();buildCriteria();initFilters();populateFacDatalist();
   startAutoSave();
   checkRememberMe();
+  // Pull users from server early so login works with latest accounts
+  if(EMBEDDED_SYNC_CFG.enabled && EMBEDDED_SYNC_CFG.url){
+    loadSyncCfg();
+    pullUsersFromServer().catch(()=>{});
+  }
   // Check for persisted session
   const saved=localStorage.getItem('hajj_session_v4');
   if(saved){
@@ -1851,15 +1856,37 @@ function saveUser(){
     if(users.find(u=>u.username===username)){showToast('⚠️ اسم الدخول مستخدم مسبقاً');return;}
     users.push({id:Date.now().toString(),name,username,password:pass,role:selectedRole,cluster,customPerms:finalPerms,active:true,createdAt:new Date().toISOString(),lastLogin:null});
   }
-  svUsers();cm('user-mo');rUsers();showToast('✅ تم حفظ المستخدم');
+  const savedId = editId || users[users.length-1]?.id;
+  svUsers();
+  // Immediately push this user to server (don't wait for debounce)
+  if(syncCfg?.enabled && savedId){
+    pushSingleUser(savedId).then(()=>showToast('✅ تم حفظ المستخدم ومزامنته ☁️'))
+      .catch(()=>showToast('✅ تم الحفظ محلياً (ستتم المزامنة لاحقاً)'));
+  } else {
+    showToast('✅ تم حفظ المستخدم');
+  }
+  cm('user-mo');rUsers();
 }
 function toggleUserActive(uid){
   const u=users.find(x=>x.id===uid);if(!u||u.role==='leader')return;
-  u.active=!u.active;svUsers();rUsers();showToast(u.active?'✅ تم تفعيل الحساب':'🔒 تم تعطيل الحساب');
+  u.active=!u.active;
+  svUsers();
+  if(syncCfg?.enabled) pushSingleUser(uid);
+  rUsers();
+  showToast(u.active?'✅ تم تفعيل الحساب':'🔒 تم تعطيل الحساب');
 }
 function deleteUser(uid){
   if(!confirm('حذف هذا المستخدم؟'))return;
-  users=users.filter(u=>u.id!==uid);svUsers();rUsers();showToast('🗑️ تم الحذف');
+  users=users.filter(u=>u.id!==uid);
+  svUsers();
+  // Delete from server immediately
+  if(syncCfg?.enabled){
+    deleteUserFromServer(uid).then(()=>showToast('🗑️ تم الحذف ومزامنته ☁️'))
+      .catch(()=>showToast('🗑️ تم الحذف محلياً'));
+  } else {
+    showToast('🗑️ تم الحذف');
+  }
+  rUsers();
 }
 function rUsers(){
   const tbody=document.getElementById('users-tbody');if(!tbody)return;
@@ -2228,16 +2255,18 @@ function startSyncTimer(){
 function stopSyncTimer(){ if(syncTimer){ clearInterval(syncTimer); syncTimer=null; } }
 
 // ── Supabase REST API helper ──────────────────────────────────
-async function sbFetch(path, method='GET', body=null){
+async function sbFetch(path, method='GET', body=null, extraHeaders={}){
   if(!syncCfg) throw new Error('no config');
   const base = syncCfg.url.endsWith('/rest/v1') ? syncCfg.url : syncCfg.url+'/rest/v1';
+  const defaultPrefer = method==='POST'?'return=representation':'';
   const opts = {
     method,
     headers: {
       'apikey': syncCfg.akey,
       'Authorization': 'Bearer '+syncCfg.akey,
       'Content-Type': 'application/json',
-      'Prefer': method==='POST'?'return=representation':'',
+      'Prefer': defaultPrefer,
+      ...extraHeaders
     }
   };
   if(body) opts.body = JSON.stringify(body);
@@ -2245,11 +2274,11 @@ async function sbFetch(path, method='GET', body=null){
   const text = await resp.text();
   if(!resp.ok){
     let msg = text;
-    try{ msg = JSON.parse(text).message||JSON.parse(text).error||text; }catch(e){}
+    try{ msg = JSON.parse(text).message||JSON.parse(text).hint||JSON.parse(text).error||text; }catch(e){}
     throw new Error('Supabase '+resp.status+': '+msg);
   }
-  if(!text) return null;
-  return JSON.parse(text);
+  if(!text||text==='null') return null;
+  try{ return JSON.parse(text); }catch(e){ return null; }
 }
 
 // ── Ensure table exists via RPC (first-time setup) ───────────
@@ -2653,7 +2682,6 @@ function markDirty(id){
 
 async function pushUsersToServer(){
   if(!syncCfg||!syncCfg.enabled) return;
-  // Only leader can push users
   if(currentUser && currentUser.role !== 'leader') return;
   try {
     const rows = users.map(u=>({
@@ -2668,21 +2696,41 @@ async function pushUsersToServer(){
       created_at: u.createdAt||new Date().toISOString(),
       last_login: u.lastLogin||null
     }));
-    for(const row of rows){
-      await sbFetch('/users?id=eq.'+encodeURIComponent(row.id), 'DELETE');
-      await sbFetch('/users', 'POST', [row]);
-    }
-    console.log('Users pushed:', rows.length);
+    // UPSERT all users in one request
+    await sbFetch('/users', 'POST', rows, {'Prefer':'resolution=merge-duplicates,return=minimal'});
+    console.log('Users upserted:', rows.length);
   } catch(e){ console.warn('pushUsers failed:', e.message); }
+}
+
+// Push single user (faster for add/edit operations)
+async function pushSingleUser(uid){
+  if(!syncCfg||!syncCfg.enabled) return;
+  const u = users.find(x=>x.id===uid);
+  if(!u) return;
+  try {
+    const row = {
+      id: u.id, name: u.name, username: u.username, password: u.password,
+      role: u.role, cluster: u.cluster||'',
+      custom_perms: u.customPerms||null, active: u.active!==false,
+      created_at: u.createdAt||new Date().toISOString(), last_login: u.lastLogin||null
+    };
+    await sbFetch('/users', 'POST', [row], {'Prefer':'resolution=merge-duplicates,return=minimal'});
+  } catch(e){ console.warn('pushSingleUser failed:', e.message); }
+}
+
+// Delete single user from server
+async function deleteUserFromServer(uid){
+  if(!syncCfg||!syncCfg.enabled) return;
+  try { await sbFetch('/users?id=eq.'+encodeURIComponent(uid), 'DELETE'); }
+  catch(e){ console.warn('deleteUser server failed:', e.message); }
 }
 
 async function pullUsersFromServer(){
   if(!syncCfg||!syncCfg.enabled) return;
   try {
-    const rows = await sbFetch('/users?order=created_at.asc&limit=200');
+    const rows = await sbFetch('/users?order=created_at.asc&limit=500');
     if(!rows||!rows.length) return;
-    // Merge: server wins for all users except current session
-    const newUsers = rows.map(row=>({
+    const serverUsers = rows.map(row=>({
       id: row.id,
       name: row.name,
       username: row.username,
@@ -2691,20 +2739,24 @@ async function pullUsersFromServer(){
       cluster: row.cluster||'',
       customPerms: row.custom_perms||null,
       active: row.active!==false,
-      createdAt: row.created_at,
+      createdAt: row.created_at||new Date().toISOString(),
       lastLogin: row.last_login||null
     }));
-    // Keep any local users not on server yet
-    const serverIds = new Set(newUsers.map(u=>u.id));
-    const localOnly = users.filter(u=>!serverIds.has(u.id)&&u._dirty);
-    users = [...newUsers, ...localOnly];
-    svUsers();
-    console.log('Users pulled:', users.length);
-    // If currentUser was updated on server, refresh their data
+    // Merge: server is source of truth
+    const serverIds = new Set(serverUsers.map(u=>u.id));
+    // Keep local users not yet pushed to server
+    const localOnly = users.filter(u=>!serverIds.has(u.id));
+    users = [...serverUsers, ...localOnly];
+    localStorage.setItem('hajj_users_v4', JSON.stringify(users));
+    // Update rUsers display if visible
+    const usersView = document.getElementById('view-users');
+    if(usersView&&usersView.classList.contains('active')) rUsers();
+    // Refresh currentUser data from server
     if(currentUser){
       const updated = users.find(u=>u.id===currentUser.id);
-      if(updated) currentUser = updated;
+      if(updated){ currentUser={...updated}; }
     }
+    console.log('Users pulled from server:', serverUsers.length);
   } catch(e){ console.warn('pullUsers failed:', e.message); }
 }
 
