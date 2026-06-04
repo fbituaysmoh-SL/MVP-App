@@ -768,6 +768,14 @@ document.addEventListener('DOMContentLoaded',()=>{
   }
   rDash();
   initSync();
+  // Push any locally saved reports that weren't synced yet
+  setTimeout(()=>{
+    const unsyncedCount = reps.filter(r=>r._dirty).length;
+    if(unsyncedCount > 0){
+      const el=document.getElementById('sync-status');
+      if(el) el.textContent=`⚠️ ${unsyncedCount} تقرير محلي غير مزامن — اضغط 🔄 للرفع`;
+    }
+  }, 2000);
 });
 function uDT(){const e=document.getElementById('dt-disp');if(e)e.textContent='📅 '+new Date().toLocaleString('ar-SA');const e2=document.getElementById('dt-disp2');if(e2)e2.textContent='📅 '+new Date().toLocaleString('ar-SA');}
 function getGeo(){if(!navigator.geolocation)return;navigator.geolocation.getCurrentPosition(p=>{geo={lat:p.coords.latitude,lng:p.coords.longitude,acc:Math.round(p.coords.accuracy)};const e=document.getElementById('geo-disp');if(e)e.textContent=`📍 ${p.coords.latitude.toFixed(5)}, ${p.coords.longitude.toFixed(5)} (±${geo.acc}م)`;},()=>{const e=document.getElementById('geo-disp');if(e)e.textContent='📍 غير متاح';});}
@@ -1049,7 +1057,15 @@ function saveRep(status){
     generalNotes:vv('inp-gnote'),geo,
     answers:{...ANS},criterionNotes:{...CNOTES},photos:{...PICS},
     score:sc,sectionScores:secSc,subSectionScores:subSc,status,reviewNotes:[]};
-  reps.unshift(r);sv();
+  r._dirty = true;  // Mark for server sync
+  reps.unshift(r);
+  // Push to server IMMEDIATELY (don't wait for debounce)
+  if(syncCfg&&syncCfg.enabled&&canSync()){
+    pushSingleReport(r).then(()=>{
+      showToast('☁️ تم رفع التقرير للسيرفر');
+    }).catch(e=>console.warn('push failed:',e));
+  }
+  sv();
   // Auto-update facility assignment if exists
   const facIdx=facilities.findIndex(f=>f.name===fac);
   if(facIdx>=0){facilities[facIdx].lastReport=r.repNum;facilities[facIdx].lastDate=r.createdAt;facilities[facIdx].hasReport=true;}
@@ -2359,22 +2375,34 @@ async function syncNow(source='manual'){
 }
 
 // ── Push local dirty reports ─────────────────────────────────
+// Push a single report using UPSERT (safe, no delete)
+async function pushSingleReport(r){
+  if(!syncCfg||!syncCfg.enabled) return;
+  const row = repToRow(r);
+  await sbFetch('/reports', 'POST', [row],
+    {'Prefer':'resolution=merge-duplicates,return=minimal'});
+  r._synced=true; delete r._dirty;
+  sv();
+}
+
 async function pushToServer(){
-  // Only users with sync permission can push
   if(currentUser && !canSync()) return;
   const dirty = reps.filter(r=>r._dirty&&!r._pushing);
   if(!dirty.length) return;
   dirty.forEach(r=>r._pushing=true);
-  for(const r of dirty){
-    try {
-      const row = repToRow(r);
-      // upsert
-      await sbFetch('/reports?id=eq.'+encodeURIComponent(r.id), 'DELETE');
-      await sbFetch('/reports', 'POST', [row]);
-      r._synced=true; delete r._dirty; delete r._pushing;
-    } catch(e){
-      delete r._pushing;
-      console.warn('Push failed for',r.id,e.message);
+  // Batch upsert all dirty reports at once
+  try {
+    const rows = dirty.map(r=>repToRow(r));
+    await sbFetch('/reports', 'POST', rows,
+      {'Prefer':'resolution=merge-duplicates,return=minimal'});
+    dirty.forEach(r=>{ r._synced=true; delete r._dirty; delete r._pushing; });
+  } catch(e){
+    dirty.forEach(r=>delete r._pushing);
+    console.warn('Batch push failed:', e.message);
+    // Fallback: push one by one
+    for(const r of dirty){
+      try { await pushSingleReport(r); }
+      catch(e2){ console.warn('Single push failed:', r.id, e2.message); }
     }
   }
   sv();
@@ -2398,11 +2426,9 @@ async function pullFromServer(){
       Object.assign(local, r); updated++;
     }
   });
-  // Remove local reports that were deleted on server (except dirty ones)
-  const before = reps.length;
-  reps = reps.filter(r=> serverIds.has(r.id) || r._dirty || r.source==='local');
-  const removed = before - reps.length;
-  if(added||updated||removed){
+  // Never remove local reports (they may not be pushed yet)
+  const removed = 0;
+  if(added||updated){
     reps.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
     sv(); rDash(); initFilters();
     const el=document.getElementById('sync-status');
